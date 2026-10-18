@@ -34,7 +34,19 @@ function dashboard_version(): ?string {
     }
 
     $process = @proc_open(
-        ['/usr/bin/git', '-C', $repository, 'tag', '--points-at', 'HEAD', '--sort=-version:refname'],
+        [
+            '/usr/bin/git',
+            '-c',
+            'safe.directory=' . $repository,
+            '-C',
+            $repository,
+            'describe',
+            '--tags',
+            '--abbrev=0',
+            '--match',
+            'v[0-9]*',
+            'HEAD',
+        ],
         [
             0 => ['pipe', 'r'],
             1 => ['pipe', 'w'],
@@ -56,10 +68,9 @@ function dashboard_version(): ?string {
         return null;
     }
 
-    foreach (preg_split('/\R/', trim($stdout)) ?: [] as $tag) {
-        if (preg_match('/^v[0-9]+(?:\.[0-9]+)+(?:[-+][0-9A-Za-z.-]+)?$/', $tag) === 1) {
-            return $tag;
-        }
+    $tag = trim($stdout);
+    if (preg_match('/^v[0-9]+(?:\.[0-9]+)+(?:[-+][0-9A-Za-z.-]+)?$/', $tag) === 1) {
+        return $tag;
     }
 
     return null;
