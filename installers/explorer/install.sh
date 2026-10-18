@@ -11,19 +11,31 @@ readonly KEY_URL=https://github.com/dgnelsonoz.gpg
 readonly TRUSTED_FINGERPRINT=FF1D7E574592ACB0CE68FED62536465B3430EEB0
 readonly TAG_PATTERN='^v[0-9]+\.[0-9]+\.[0-9]+-entropy39\.[0-9]+$'
 
-readonly INSTALL_DIR=/usr/local/lib/btc-rpc-explorer
-readonly ENV_FILE=/etc/btc-rpc-explorer.env
-readonly SERVICE_FILE=/etc/systemd/system/explorer.service
-readonly APACHE_SITE=/etc/apache2/sites-available/explorer.conf
-readonly APACHE_PORTS=/etc/apache2/ports.conf
-readonly BITCOIN_CONF=/etc/bitcoin.conf
-readonly DASHBOARD_DIR=/srv/www/dashboard
-readonly STATE_DIR=/var/lib/entropy39-node
+if [[ ${BASH_SOURCE[0]} != "$0" && -n ${EXPLORER_INSTALLER_TEST_ROOT:-} ]]; then
+    readonly INSTALL_DIR=$EXPLORER_INSTALLER_TEST_ROOT/install
+    readonly ENV_FILE=$EXPLORER_INSTALLER_TEST_ROOT/etc/btc-rpc-explorer.env
+    readonly SERVICE_FILE=$EXPLORER_INSTALLER_TEST_ROOT/etc/explorer.service
+    readonly APACHE_SITE=$EXPLORER_INSTALLER_TEST_ROOT/etc/explorer.conf
+    readonly APACHE_PORTS=$EXPLORER_INSTALLER_TEST_ROOT/etc/ports.conf
+    readonly BITCOIN_CONF=$EXPLORER_INSTALLER_TEST_ROOT/etc/bitcoin.conf
+    readonly DASHBOARD_DIR=$EXPLORER_INSTALLER_TEST_ROOT/dashboard
+    readonly STATE_DIR=$EXPLORER_INSTALLER_TEST_ROOT/state
+    readonly UPDATE_BACKUP=$EXPLORER_INSTALLER_TEST_ROOT/update-backup
+else
+    readonly INSTALL_DIR=/usr/local/lib/btc-rpc-explorer
+    readonly ENV_FILE=/etc/btc-rpc-explorer.env
+    readonly SERVICE_FILE=/etc/systemd/system/explorer.service
+    readonly APACHE_SITE=/etc/apache2/sites-available/explorer.conf
+    readonly APACHE_PORTS=/etc/apache2/ports.conf
+    readonly BITCOIN_CONF=/etc/bitcoin.conf
+    readonly DASHBOARD_DIR=/srv/www/dashboard
+    readonly STATE_DIR=/var/lib/entropy39-node
+    readonly UPDATE_BACKUP=/usr/local/lib/.btc-rpc-explorer-update-backup
+fi
 readonly WORK_DIR=$STATE_DIR/explorer-install-work
 readonly MARKER=$STATE_DIR/explorer-install-incomplete
 readonly TAG_RECORD=$STATE_DIR/explorer-installed-tag
 readonly COMMIT_RECORD=$STATE_DIR/explorer-installed-commit
-readonly UPDATE_BACKUP=/usr/local/lib/.btc-rpc-explorer-update-backup
 
 MODE=
 PASSWORD_FILE=
@@ -34,6 +46,7 @@ OLD_COMMIT=
 WEB_PASSWORD=
 RPCAUTH_LINE=
 FAILURE_ARMED=no
+ROLLBACK_RESULT=failed
 
 say() { printf '==> %s\n' "$*"; }
 warn() { printf 'WARNING: %s\n' "$*" >&2; }
@@ -231,6 +244,38 @@ active_rpcauth_script() {
     printf '%s\n' "$script"
 }
 
+write_environment_value() {
+    local value=$1
+    value=${value//\\/\\\\}
+    value=${value//\"/\\\"}
+    value=${value//\$/\\\$}
+    printf '"%s"' "$value"
+}
+
+write_environment_file() {
+    local template=$1 output=$2 rpc_password=$3 web_password=$4
+    local line prefix suffix
+    while IFS= read -r line || [[ -n $line ]]; do
+        case $line in
+            *RPC-PASSWORD-HERE*)
+                prefix=${line%%RPC-PASSWORD-HERE*}
+                suffix=${line#*RPC-PASSWORD-HERE}
+                printf '%s' "$prefix"
+                write_environment_value "$rpc_password"
+                printf '%s\n' "$suffix"
+                ;;
+            *EXPLORER-PASSWORD-HERE*)
+                prefix=${line%%EXPLORER-PASSWORD-HERE*}
+                suffix=${line#*EXPLORER-PASSWORD-HERE}
+                printf '%s' "$prefix"
+                write_environment_value "$web_password"
+                printf '%s\n' "$suffix"
+                ;;
+            *) printf '%s\n' "$line" ;;
+        esac
+    done <"$template" >"$output"
+}
+
 stage_install_configuration() {
     local rpc_output rpc_password rpcauth_script
     read_web_password
@@ -243,11 +288,8 @@ stage_install_configuration() {
     rpc_password=$(awk '/^Your password:/{getline; print; exit}' "$rpc_output")
     [[ -n $RPCAUTH_LINE && -n $rpc_password ]] || die "rpcauth.py did not produce the expected credentials."
 
-    cp "$CONF_DIR/btc-rpc-explorer.env" "$WORK_DIR/btc-rpc-explorer.env"
-    RPC_PASSWORD=$rpc_password WEB_PASSWORD=$WEB_PASSWORD awk '
-        { gsub(/RPC-PASSWORD-HERE/, ENVIRON["RPC_PASSWORD"]); gsub(/EXPLORER-PASSWORD-HERE/, ENVIRON["WEB_PASSWORD"]); print }
-    ' "$WORK_DIR/btc-rpc-explorer.env" >"$WORK_DIR/btc-rpc-explorer.env.new"
-    mv "$WORK_DIR/btc-rpc-explorer.env.new" "$WORK_DIR/btc-rpc-explorer.env"
+    write_environment_file "$CONF_DIR/btc-rpc-explorer.env" \
+        "$WORK_DIR/btc-rpc-explorer.env" "$rpc_password" "$WEB_PASSWORD"
     chmod 0600 "$WORK_DIR/btc-rpc-explorer.env"
 
     cp --preserve=mode,ownership,timestamps "$BITCOIN_CONF" "$WORK_DIR/bitcoin.conf.original"
@@ -268,8 +310,8 @@ stage_install_configuration() {
 sha256() { sha256sum "$1" | awk '{print $1}'; }
 
 write_marker() {
-    local mode=$1 phase=$2
-    install -d -o root -g root -m 0700 "$STATE_DIR"
+    local mode=$1 phase=$2 temporary=${MARKER}.new
+    install -d -o root -g root -m 0700 "$STATE_DIR" || return 1
     {
         printf 'mode=%s\n' "$mode"
         printf 'phase=%s\n' "$phase"
@@ -286,8 +328,9 @@ write_marker() {
             printf 'ports_sha256=%s\n' "$(sha256 "$WORK_DIR/ports.conf")"
             printf 'ports_original_sha256=%s\n' "$(sha256 "$WORK_DIR/ports.conf.original")"
         fi
-    } >"$MARKER"
-    chmod 0600 "$MARKER"
+    } >"$temporary" || return 1
+    chmod 0600 "$temporary" || return 1
+    mv -f -- "$temporary" "$MARKER" || return 1
 }
 
 marker_value() {
@@ -303,14 +346,31 @@ verify_staged_file() {
         die "Staged recovery file failed verification: $file"
 }
 
+verify_recorded_file() {
+    local file=$1 key=$2 expected
+    expected=$(marker_value "$key") || die "The recovery marker is missing $key."
+    [[ $expected =~ ^[0-9a-f]{64}$ && -f $file && $(sha256 "$file") == "$expected" ]] || \
+        die "Installed recovery file failed verification: $file"
+}
+
 verify_release_tree() {
     local repo=$1 expected=$2 status
-    [[ -d $repo/.git ]] || die "The staged Explorer release has no Git metadata."
-    [[ $(git -C "$repo" rev-parse HEAD) == "$expected" ]] || die "The staged Explorer release is at an unexpected commit."
-    git -C "$repo" fsck --full --no-dangling >/dev/null || die "The staged Explorer Git data failed verification."
-    git -C "$repo" diff --quiet "$expected" -- . || die "Tracked files in the staged Explorer release were modified."
+    release_matches_commit "$repo" "$expected" || die "The staged Explorer release failed verification."
+}
+
+release_matches_commit() {
+    local repo=$1 expected=$2 status
+    [[ -d $repo/.git ]] || return 1
+    [[ $(git -C "$repo" rev-parse HEAD 2>/dev/null) == "$expected" ]] || return 1
+    git -C "$repo" fsck --full --no-dangling >/dev/null 2>&1 || return 1
+    git -C "$repo" diff --quiet "$expected" -- . || return 1
     status=$(git -C "$repo" status --porcelain --untracked-files=normal)
-    [[ -z $status || $status == '?? node_modules/' ]] || die "Unexpected untracked files exist in the Explorer release."
+    [[ -z $status || $status == '?? node_modules/' ]]
+}
+
+release_tag_matches_commit() {
+    local repo=$1 tag=$2 expected=$3
+    [[ $(git -C "$repo" rev-parse "$tag^{commit}" 2>/dev/null) == "$expected" ]]
 }
 
 ensure_explorer_account() {
@@ -400,7 +460,7 @@ verify_running_installation() {
 }
 
 failure_handler() {
-    local result=$? recorded_mode current staged
+    local result=$? recorded_mode recorded_phase current staged
     trap - EXIT ERR INT TERM HUP
     if [[ $FAILURE_ARMED == yes ]]; then
         warn "Explorer did not complete; verified staged files and the recovery marker were preserved."
@@ -408,7 +468,9 @@ failure_handler() {
             systemctl stop explorer.service >/dev/null 2>&1 || warn "Explorer could not be stopped; installed files were preserved for recovery."
         fi
         recorded_mode=$(marker_value mode 2>/dev/null || true)
-        if [[ $recorded_mode == install ]] && ! systemctl is-active --quiet explorer.service; then
+        recorded_phase=$(marker_value phase 2>/dev/null || true)
+        if [[ $recorded_mode == install && $recorded_phase != complete ]] && \
+                ! systemctl is-active --quiet explorer.service; then
             if [[ -f $WORK_DIR/bitcoin.conf && -f $WORK_DIR/bitcoin.conf.original && -f $BITCOIN_CONF ]]; then
                 current=$(sha256 "$BITCOIN_CONF")
                 staged=$(sha256 "$WORK_DIR/bitcoin.conf")
@@ -433,14 +495,30 @@ failure_handler() {
     exit "$result"
 }
 
-complete_operation() {
-    printf '%s\n' "$SELECTED_TAG" >"$TAG_RECORD"
-    printf '%s\n' "$SELECTED_COMMIT" >"$COMMIT_RECORD"
-    chown root:root "$TAG_RECORD" "$COMMIT_RECORD"
-    chmod 0644 "$TAG_RECORD" "$COMMIT_RECORD"
-    rm -f -- "$MARKER"
-    rm -rf -- "$WORK_DIR" "$UPDATE_BACKUP"
+write_release_records() {
+    local tag=$1 commit=$2 tag_temporary=${TAG_RECORD}.new commit_temporary=${COMMIT_RECORD}.new
+    printf '%s\n' "$tag" >"$tag_temporary" || return 1
+    printf '%s\n' "$commit" >"$commit_temporary" || return 1
+    chown root:root "$tag_temporary" "$commit_temporary" || return 1
+    chmod 0644 "$tag_temporary" "$commit_temporary" || return 1
+    mv -f -- "$tag_temporary" "$TAG_RECORD" || return 1
+    mv -f -- "$commit_temporary" "$COMMIT_RECORD" || return 1
+}
+
+finish_operation() {
+    local tag=$1 commit=$2
+    write_release_records "$tag" "$commit" || return 1
+    rm -rf -- "$WORK_DIR" "$UPDATE_BACKUP" || return 1
+    rm -f -- "$MARKER" || return 1
     FAILURE_ARMED=no
+}
+
+complete_operation() {
+    write_marker "$MODE" complete || \
+        die "Explorer is running, but completion could not be recorded; existing recovery information was preserved."
+    FAILURE_ARMED=no
+    finish_operation "$SELECTED_TAG" "$SELECTED_COMMIT" || \
+        die "Explorer is running, but completion cleanup failed; recovery information was preserved."
 }
 
 commit_install() {
@@ -496,10 +574,28 @@ load_common_marker() {
 }
 
 recover_install() {
+    local phase
     say "Recovering an interrupted Explorer installation"
+    load_common_marker
+    phase=$(marker_value phase) || die "The recovery marker has no phase."
+    if [[ $phase == complete ]]; then
+        if ! release_matches_commit "$INSTALL_DIR" "$SELECTED_COMMIT" || \
+                ! release_tag_matches_commit "$INSTALL_DIR" "$SELECTED_TAG" "$SELECTED_COMMIT"; then
+            die "The completed Explorer installation failed release verification; recovery information was preserved."
+        fi
+        verify_recorded_file "$ENV_FILE" env_sha256
+        verify_recorded_file "$BITCOIN_CONF" bitcoin_sha256
+        verify_recorded_file "$SERVICE_FILE" service_sha256
+        verify_recorded_file "$APACHE_SITE" apache_sha256
+        verify_recorded_file "$APACHE_PORTS" ports_sha256
+        finish_operation "$SELECTED_TAG" "$SELECTED_COMMIT" || \
+            die "The completed Explorer installation could not finish cleanup; recovery information was preserved."
+        say "Completed Explorer installation recovery successfully."
+        return
+    fi
+    [[ $phase == committing ]] || die "Unknown Explorer installation recovery phase: $phase"
     [[ -d $WORK_DIR && ! -L $WORK_DIR && $(stat -c '%U:%G:%a' "$WORK_DIR") == root:root:700 ]] || \
         die "The Explorer recovery directory is missing or unsafe."
-    load_common_marker
     verify_staged_file "$WORK_DIR/btc-rpc-explorer.env" env_sha256
     verify_staged_file "$WORK_DIR/bitcoin.conf" bitcoin_sha256
     verify_staged_file "$WORK_DIR/bitcoin.conf.original" bitcoin_original_sha256
@@ -532,24 +628,81 @@ verify_existing_update_source() {
 }
 
 rollback_update() {
+    ROLLBACK_RESULT=failed
     warn "The Explorer update failed; restoring the previous verified checkout."
-    systemctl stop explorer.service >/dev/null 2>&1 || true
-    if [[ -d $UPDATE_BACKUP ]]; then
-        [[ ! -e $WORK_DIR/failed-release ]] || rm -rf -- "$WORK_DIR/failed-release"
-        [[ ! -e $INSTALL_DIR ]] || mv "$INSTALL_DIR" "$WORK_DIR/failed-release"
-        mv "$UPDATE_BACKUP" "$INSTALL_DIR"
-        if systemctl start explorer.service && systemctl is-active --quiet explorer.service && wait_for_explorer; then
-            rm -f -- "$MARKER"
-            rm -rf -- "$WORK_DIR"
-            FAILURE_ARMED=no
-            return 0
-        fi
-        warn "The previous Explorer checkout was restored but did not start; preserving both releases for recovery."
-        systemctl stop explorer.service >/dev/null 2>&1 || true
-        mv "$INSTALL_DIR" "$UPDATE_BACKUP"
-        mv "$WORK_DIR/failed-release" "$INSTALL_DIR"
+    if ! write_marker update rolling-back; then
+        warn "The rollback marker could not be written; both releases were left in place."
+        return 1
     fi
-    return 1
+    systemctl stop explorer.service >/dev/null 2>&1 || true
+
+    if [[ -e $INSTALL_DIR ]] && release_matches_commit "$INSTALL_DIR" "$SELECTED_COMMIT"; then
+        if [[ -e $WORK_DIR/failed-release ]]; then
+            warn "The failed Explorer release already has a preserved copy; automatic rollback stopped."
+            return 1
+        fi
+        if ! mv "$INSTALL_DIR" "$WORK_DIR/failed-release"; then
+            warn "The failed Explorer release could not be preserved; automatic rollback stopped."
+            return 1
+        fi
+    elif [[ -e $INSTALL_DIR ]] && ! release_matches_commit "$INSTALL_DIR" "$OLD_COMMIT"; then
+        warn "The active Explorer directory is not a verified old or new release; automatic rollback stopped."
+        return 1
+    elif [[ ! -e $INSTALL_DIR && -d $WORK_DIR/release ]]; then
+        if [[ -e $WORK_DIR/failed-release ]] || ! mv "$WORK_DIR/release" "$WORK_DIR/failed-release"; then
+            warn "The failed Explorer release could not be preserved; automatic rollback stopped."
+            return 1
+        fi
+    fi
+
+    if [[ ! -e $INSTALL_DIR ]]; then
+        if [[ ! -d $UPDATE_BACKUP ]] || ! mv "$UPDATE_BACKUP" "$INSTALL_DIR"; then
+            warn "The previous Explorer checkout could not be restored; both releases and recovery information were preserved."
+            return 1
+        fi
+    fi
+    if ! release_matches_commit "$INSTALL_DIR" "$OLD_COMMIT"; then
+        warn "The restored Explorer checkout failed verification; both releases and recovery information were preserved."
+        return 1
+    fi
+    if ! systemctl start explorer.service || ! systemctl is-active --quiet explorer.service || ! wait_for_explorer; then
+        warn "The previous Explorer checkout was restored but did not start; both releases and recovery information were preserved."
+        systemctl stop explorer.service >/dev/null 2>&1 || true
+        return 1
+    fi
+
+    ROLLBACK_RESULT=restored
+    if ! write_marker update rolled-back; then
+        warn "The previous Explorer version is running, but rollback completion could not be recorded."
+        return 1
+    fi
+    FAILURE_ARMED=no
+    if ! finish_operation "$OLD_TAG" "$OLD_COMMIT"; then
+        warn "The previous Explorer version is running, but rollback cleanup did not complete; recovery information was preserved."
+        return 1
+    fi
+    return 0
+}
+
+report_failed_update() {
+    local context=$1
+    if rollback_update; then
+        die "$context; the previous checkout was restored successfully."
+    fi
+    if [[ $ROLLBACK_RESULT == restored ]]; then
+        die "$context; the previous checkout is running, but rollback cleanup did not complete and recovery information was preserved."
+    fi
+    die "$context; automatic rollback failed, and both releases and recovery information were preserved."
+}
+
+finish_recovered_rollback() {
+    if ! release_matches_commit "$INSTALL_DIR" "$OLD_COMMIT" || \
+            ! release_tag_matches_commit "$INSTALL_DIR" "$OLD_TAG" "$OLD_COMMIT"; then
+        die "The rolled-back Explorer checkout failed verification; recovery information was preserved."
+    fi
+    finish_operation "$OLD_TAG" "$OLD_COMMIT" || \
+        die "The completed Explorer rollback could not finish cleanup; recovery information was preserved."
+    say "The previous Explorer version was restored successfully."
 }
 
 commit_update() {
@@ -560,8 +713,7 @@ commit_update() {
     mv "$WORK_DIR/release" "$INSTALL_DIR"
     chown -R root:root "$INSTALL_DIR"
     if ! systemctl start explorer.service || ! systemctl is-active --quiet explorer.service || ! wait_for_explorer; then
-        rollback_update || true
-        die "The new Explorer release failed startup verification; the previous checkout was restored."
+        report_failed_update "The new Explorer release failed startup verification"
     fi
     complete_operation
     say "BTC RPC Explorer was updated from $OLD_TAG to $SELECTED_TAG successfully."
@@ -595,6 +747,35 @@ recover_update() {
     OLD_COMMIT=$(marker_value old_commit) || die "The recovery marker has no previous commit."
     phase=$(marker_value phase) || die "The recovery marker has no phase."
     [[ $OLD_TAG =~ $TAG_PATTERN && $OLD_COMMIT =~ ^[0-9a-f]{40}$ ]] || die "The recovery marker contains invalid previous-release data."
+
+    case $phase in
+        complete)
+            if ! release_matches_commit "$INSTALL_DIR" "$SELECTED_COMMIT" || \
+                    ! release_tag_matches_commit "$INSTALL_DIR" "$SELECTED_TAG" "$SELECTED_COMMIT"; then
+                die "The completed Explorer update failed release verification; recovery information was preserved."
+            fi
+            finish_operation "$SELECTED_TAG" "$SELECTED_COMMIT" || \
+                die "The completed Explorer update could not finish cleanup; recovery information was preserved."
+            say "Completed Explorer update recovery successfully."
+            return
+            ;;
+        rolling-back)
+            if rollback_update; then
+                say "The previous Explorer version was restored successfully."
+                return
+            fi
+            if [[ $ROLLBACK_RESULT == restored ]]; then
+                die "The previous Explorer version is running, but rollback cleanup did not complete and recovery information was preserved."
+            fi
+            die "Automatic Explorer rollback failed; both releases and recovery information were preserved."
+            ;;
+        rolled-back)
+            finish_recovered_rollback
+            return
+            ;;
+        prepared|swapped) ;;
+        *) die "Unknown Explorer update recovery phase: $phase" ;;
+    esac
     prepare_keyring
 
     if [[ $phase == prepared ]]; then
@@ -609,8 +790,7 @@ recover_update() {
             mv "$WORK_DIR/release" "$INSTALL_DIR"
             chown -R root:root "$INSTALL_DIR"
             if ! systemctl start explorer.service || ! systemctl is-active --quiet explorer.service || ! wait_for_explorer; then
-                rollback_update || true
-                die "The interrupted update failed verification; the previous checkout was restored."
+                report_failed_update "The interrupted update failed startup verification"
             fi
             complete_operation
             say "Interrupted Explorer update to $SELECTED_TAG recovered successfully."
@@ -626,7 +806,6 @@ recover_update() {
         commit_update
         return
     fi
-    [[ $phase == swapped ]] || die "Unknown Explorer update recovery phase: $phase"
     [[ -d $UPDATE_BACKUP ]] || die "The previous Explorer checkout is missing; no files were changed."
     verify_tag "$UPDATE_BACKUP" "$OLD_TAG"
     [[ $(git -C "$UPDATE_BACKUP" rev-parse "$OLD_TAG^{commit}") == "$OLD_COMMIT" ]] || \
@@ -644,8 +823,7 @@ recover_update() {
         die "The new authenticated Explorer checkout is missing; the previous checkout was preserved."
     fi
     if ! systemctl start explorer.service || ! systemctl is-active --quiet explorer.service || ! wait_for_explorer; then
-        rollback_update || true
-        die "The interrupted update failed verification; the previous checkout was restored."
+        report_failed_update "The interrupted update failed startup verification"
     fi
     complete_operation
     say "Interrupted Explorer update to $SELECTED_TAG recovered successfully."
@@ -664,22 +842,46 @@ recover_if_needed() {
     return 0
 }
 
+terminal_recovery_pending() {
+    local phase
+    [[ -e $MARKER ]] || return 1
+    phase=$(marker_value phase 2>/dev/null) || return 1
+    [[ $phase == complete || $phase == rolled-back ]]
+}
+
+check_terminal_recovery_commands() {
+    local recorded_mode
+    require_command git
+    recorded_mode=$(marker_value mode) || die "The Explorer recovery marker has no mode."
+    [[ $recorded_mode != install ]] || require_command sha256sum
+}
+
+recover_existing_operation() {
+    if terminal_recovery_pending; then
+        check_terminal_recovery_commands
+    else
+        check_platform
+        check_templates
+        check_commands
+        check_prerequisites
+    fi
+    recover_if_needed
+}
+
 main() {
     parse_args "$@"
     require_root
-    check_platform
-    check_templates
     require_command flock
     acquire_lock
     trap failure_handler EXIT ERR INT TERM HUP
 
     if [[ -e $MARKER ]]; then
-        check_commands
-        check_prerequisites
-        recover_if_needed
+        recover_existing_operation
         return
     fi
 
+    check_platform
+    check_templates
     install_dependencies
     check_commands
     check_prerequisites
@@ -689,4 +891,6 @@ main() {
     esac
 }
 
-main "$@"
+if [[ ${BASH_SOURCE[0]} == "$0" ]]; then
+    main "$@"
+fi
