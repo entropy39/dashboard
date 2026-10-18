@@ -132,7 +132,6 @@ body.view-rtl{
 }
 
 .site-logo-owner{
-  margin-right: 1.4rem;
   font-family: "Dashboard Roboto", "Segoe UI", system-ui, -apple-system, Helvetica, Arial, sans-serif;
   font-size: 1.25rem;
   font-style: normal;
@@ -143,15 +142,6 @@ body.view-rtl{
 
 .site-logo-text{
   text-transform: none;
-}
-
-@media (min-width: 601px){
-  .site-logo-text{
-    position: absolute;
-    left: min(360px, 50%);
-    transform: translateX(-50%);
-    white-space: nowrap;
-  }
 }
 
 .site-logo-demo{
