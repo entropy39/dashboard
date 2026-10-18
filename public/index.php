@@ -71,7 +71,7 @@ if ($isDemoServiceView) {
 <html lang="en">
 <head>
   <meta charset="utf-8" />
-  <title>Bitcoin Node</title>
+  <title>Entropy39</title>
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <link rel="stylesheet" href="/assets/styles.css?v=69">
   <link rel="shortcut icon" href="/favicon.ico?v=5">
