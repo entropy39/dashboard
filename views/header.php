@@ -2,7 +2,7 @@
   <div class="site-header-inner">
     <div class="site-logo">
       <span class="site-logo-owner">Entropy39</span>
-      <span class="site-logo-text">Node Dashboard</span>
+      <span class="site-logo-text">Node Manager</span>
       <?php if ($isDemo): ?>
         <span class="site-logo-demo">Demo Mode</span>
       <?php endif; ?>
