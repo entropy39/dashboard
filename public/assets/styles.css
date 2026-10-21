@@ -131,15 +131,6 @@ body.view-rtl{
   gap: 0.5rem;
 }
 
-.site-logo-owner{
-  font-family: "Dashboard Roboto", "Segoe UI", system-ui, -apple-system, Helvetica, Arial, sans-serif;
-  font-size: 1.25rem;
-  font-style: normal;
-  font-weight: 700;
-  letter-spacing: 0.04em;
-  text-transform: none;
-}
-
 .site-logo-text{
   text-transform: none;
 }
