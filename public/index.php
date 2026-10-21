@@ -8,7 +8,6 @@ if (!in_array($view, $views, true)) {
 }
 
 $isDemo = dashboard_is_demo();
-$dashboardVersion = $view === 'home' ? dashboard_version() : null;
 
 $embeddedViews = $isDemo ? [] : ['explorer', 'mempool', 'rtl'];
 $isEmbeddedView = in_array($view, $embeddedViews, true);

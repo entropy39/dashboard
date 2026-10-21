@@ -1,18 +1,6 @@
 <!-- Home dashboard -->
 <section class="cards cards-status">
 
-  <!-- Node Manager version card -->
-  <article class="card status-card dashboard-console-card">
-    <h2>Node Manager</h2>
-
-    <div class="kv-rows" role="list">
-      <div class="kv-row" role="listitem">
-        <div class="kv-k">Version</div>
-        <div class="kv-v"><?php echo htmlspecialchars($dashboardVersion ?? '--', ENT_QUOTES, 'UTF-8'); ?></div>
-      </div>
-    </div>
-  </article>
-
   <!-- Bitcoin Node console card -->
   <article class="card status-card node-console-card">
     <h2><span class="status-led" aria-hidden="true"></span>Bitcoin Node</h2>
