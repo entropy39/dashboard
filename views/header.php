@@ -1,7 +1,7 @@
 <header class="site-header">
   <div class="site-header-inner">
     <div class="site-logo">
-      <span class="site-logo-text">Entropy Node Dashboard</span>
+      <span class="site-logo-text">Entropy39 Node Dashboard</span>
       <?php if ($isDemo): ?>
         <span class="site-logo-demo">Demo Mode</span>
       <?php endif; ?>
